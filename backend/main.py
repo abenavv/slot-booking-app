@@ -1,9 +1,16 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()  # This looks for your .env file and loads the variables
+
+
 from fastapi import FastAPI
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 #for frontend backend connection shitties
 from datetime import date,timedelta
 #timedelta is like delta function diffrnce kittan
+import psycopg
 
 app = FastAPI()
 
@@ -34,39 +41,74 @@ facilities = [
 def health():
     return {"status": "ok"}
 
-
+#for db connections(call this fn when needed)
+def get_db_connection():
+    return psycopg.connect(
+        host=os.getenv("DB_HOST"),
+        dbname=os.getenv("DB_NAME"),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD")
+    )
+    
 # 1. List the 3 facilities(pydantic modal this too)
 @app.get("/facilities")
 def get_facilities():
-    return [facility.model_dump() for facility in facilities]
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT f_id, name, weekday_price, weekend_price
+                FROM facilities
+            """)
+            rows = cur.fetchall()
+
+    return [
+        {
+            "id": row[0],
+            "name": row[1],
+            "weekday_price": float(row[2]),
+            "weekend_price": float(row[3])
+        }
+        for row in rows
+    ]
+    
+    #using sql(with the help of psycopg for showing off facilities)
 
 
 # 2. Slots for a facility on a date
 @app.get("/slots")
 def get_slots(facility_id: int, date_str: str):
     try:
-        date.fromisoformat(date_str)
-        #checking if its a valid date ie if conversion to py readabel form is possible then its gud
+        parsed_date=date.fromisoformat(date_str)
+        #checking if its a valid date ie if conversion to py readable form is possible then its gud
     except ValueError:
         return { "message": "Invalid date format. Use YYYY-MM-DD" }
-    #just validated the date entering here as in correct format    
+    #just validated the date entering here as in correct format
+    
+    #fetching all booked start times for this facility n date
+    #booked slots kittan(is_booked shit)
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                        SELECT start_time
+                        FROM bookings
+                        WHERE f_id=%s and booking_date=%s
+                        """,(facility_id,parsed_date))
+            rows=cur.fetchall()
+    
+    # rows looks like [(datetime.time(6, 0),), (datetime.time(10, 0),)]
+    # Convert each time to "HH:00" string so we can easily compare
+    # This is a set now with all booked times
+    booked_times={row[0].strftime("%H:%M") for row in rows}
+        
     hours=range(6, 22)  # 6 AM to 11 PM.last slot 9-10
     slots=[]
     for hour in hours:
-        #availablity also shows here now
-        is_booked=any(
-            existing_booking["facility_id"]==facility_id
-            #booking not yet came we have start hr(hour),facility_id and date with us
-            and existing_booking["date"]==date_str
-            and existing_booking["start_time"]==f"{hour:02d}:00"
-            for existing_booking in bookings
-        )
-        #any means ethenkilum oralk in those loop of existing bookings true ano enn nokm
-        #if yes is_booked=true varum
+        start_time=f"{hour:02d}:00" #make hr 6 to 06:00
         slot={
-            "start_time": f"{hour:02d}:00", #make hr 6 to 06:00
+            "start_time": start_time, 
             "end_time": f"{hour+1:02d}:00",
-            "status": "booked" if is_booked else "available"
+            "status" : "booked" if start_time in booked_times else "available"
+            # If start_time in that set then booked
             }
         slots.append(slot)
     
@@ -130,7 +172,7 @@ def create_booking(booking: BookingRequest):
         
     
     #maximum 3 active bookings
-    
+
     active_count=0
     
     for existing_booking in bookings:
